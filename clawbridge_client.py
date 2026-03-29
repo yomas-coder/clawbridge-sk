@@ -4,6 +4,8 @@ import base64
 import sys
 import time
 import hashlib
+import os
+import random
 from pathlib import Path
 
 import websockets
@@ -39,7 +41,16 @@ class ClawBridgeClient:
         self._registered = False
 
         # ── 加载或初始化身份 ──────────────────────────────────────────
-        CLAWBRIDGE_DIR.mkdir(exist_ok=True)
+        CLAWBRIDGE_DIR.mkdir(exist_ok=True, parents=True)
+        # 清理可能因进程崩溃遗留的注册锁
+        stale_lock = CLAWBRIDGE_DIR / "register.lock"
+        if stale_lock.exists():
+            try:
+                old_pid = int(stale_lock.read_text().strip())
+                os.kill(old_pid, 0)   # 进程仍存活，锁有效，不清除
+            except (ValueError, OSError):
+                stale_lock.unlink(missing_ok=True)
+                _log("[ClawBridge] 🧹 清理遗留注册锁")
         identity = self._load_identity()
         if identity:
             self.client_id = identity["id"]
@@ -114,6 +125,68 @@ class ClawBridgeClient:
             _log(f"[ClawBridge] 🔑 E2E 密钥已保存：{key_file}")
         except Exception as e:
             _log(f"[ClawBridge] ⚠️ E2E 密钥文件写入失败: {e}")
+
+    # ── 注册互斥锁（防止多进程同时注册产生多个手机号）────────────────────
+
+    def _acquire_reg_lock(self) -> bool:
+        """尝试获取注册锁。成功返回 True，锁已被占用返回 False。"""
+        lock_path = CLAWBRIDGE_DIR / "register.lock"
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            return True
+        except FileExistsError:
+            return False
+
+    def _release_reg_lock(self):
+        lock_path = CLAWBRIDGE_DIR / "register.lock"
+        try:
+            lock_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    async def _register_once(self):
+        """
+        注册互斥：同一目录下只有一个进程真正注册，其余进程等待并复用注册结果。
+        """
+        # 随机等一小段，降低多进程同时竞争的概率
+        await asyncio.sleep(random.uniform(0, 0.5))
+
+        # 再次检查：等待期间其他进程可能已经注册好了
+        identity = self._load_identity()
+        if identity:
+            self.client_id   = identity["id"]
+            self.api_key     = identity["api_key"]
+            self.private_key = self._load_or_generate_key(self.client_id)
+            self.public_key_b64 = self.private_key.public_key.encode(
+                encoder=Base64Encoder
+            ).decode("utf-8")
+            _log(f"[ClawBridge] 🔄 复用其他进程已注册的身份：{self.client_id}")
+            return
+
+        if not self._acquire_reg_lock():
+            # 其他进程正在注册，等待最多 12 秒
+            _log("[ClawBridge] ⏳ 其他进程正在注册，等待...")
+            for _ in range(24):
+                await asyncio.sleep(0.5)
+                identity = self._load_identity()
+                if identity:
+                    self.client_id   = identity["id"]
+                    self.api_key     = identity["api_key"]
+                    self.private_key = self._load_or_generate_key(self.client_id)
+                    self.public_key_b64 = self.private_key.public_key.encode(
+                        encoder=Base64Encoder
+                    ).decode("utf-8")
+                    _log(f"[ClawBridge] 🔄 复用其他进程已注册的身份：{self.client_id}")
+                    return
+            # 超时仍未获得身份，尝试自己注册（兜底）
+            _log("[ClawBridge] ⚠️ 等待超时，尝试自行注册...")
+
+        try:
+            await self._register()
+        finally:
+            self._release_reg_lock()
 
     def _clear_identity(self):
         """清除本地身份（identity.json + key 文件），触发下次重连时重新注册"""
@@ -243,7 +316,7 @@ class ClawBridgeClient:
 
             # 首次运行或账号被删后：注册获取 ID + API Key
             if self.client_id is None:
-                await self._register()
+                await self._register_once()
                 if self._pending_reregister:
                     self._notice = (
                         f"⚠️ 原账号已被管理员删除，已自动重新注册，"
