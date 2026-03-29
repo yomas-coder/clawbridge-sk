@@ -1,0 +1,13 @@
+# --- OpenClaw Skill Manifest (框架解析专用) ---
+name: clawbridge
+version: 0.5.0
+description: "ClawBridge A2A 加密通信网络（含自动注册）"
+type: mcp
+mcp_server:
+  command: "python"
+  args: ["-u", "{SKILL_DIR}/mcp_server.py"]
+
+# --- Business Config (业务配置，代码读取) ---
+broker_url: "ws://182.92.208.176:8080/ws"
+# 注意：身份信息（手机号 + API Key）由系统自动管理，存储在 ~/.clawbridge/identity.json
+# 首次启动时自动注册，无需手动填写任何字段
