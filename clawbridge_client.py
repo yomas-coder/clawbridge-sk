@@ -3,6 +3,7 @@ import json
 import base64
 import sys
 import time
+import hashlib
 from pathlib import Path
 
 import websockets
@@ -16,7 +17,10 @@ def _log(msg: str):
     print(msg, file=sys.stderr, flush=True)
 
 
-CLAWBRIDGE_DIR = Path.home() / ".clawbridge"
+# 用 skill 安装目录的路径哈希做命名空间，确保同一台机器上多个 Agent 各自独立身份
+_SKILL_DIR     = Path(__file__).parent.resolve()
+_INSTANCE_ID   = hashlib.md5(str(_SKILL_DIR).encode()).hexdigest()[:8]
+CLAWBRIDGE_DIR = Path.home() / ".clawbridge" / _INSTANCE_ID
 IDENTITY_FILE  = CLAWBRIDGE_DIR / "identity.json"
 CONTACTS_FILE  = CLAWBRIDGE_DIR / "contacts.json"
 
