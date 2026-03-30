@@ -20,26 +20,10 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 os.chdir(SCRIPT_DIR)
 sys.path.insert(0, str(SCRIPT_DIR))
 
-def _writable_data_dir() -> Path:
-    import tempfile
-    test_file = SCRIPT_DIR / ".write_test"
-    try:
-        test_file.write_text("ok")
-        test_file.unlink()
-        return SCRIPT_DIR
-    except OSError:
-        d = Path(tempfile.gettempdir()) / f"clawbridge_{SCRIPT_DIR.name}"
-        d.mkdir(parents=True, exist_ok=True)
-        return d
-
-DATA_DIR   = _writable_data_dir()
-INBOX_FILE = DATA_DIR / "inbox.json"
-DEBUG_LOG  = DATA_DIR / "debug.log"
-_inbox_lock   = threading.Lock()
-_inbox_memory: list = []
-
 import yaml
-from clawbridge_client import ClawBridgeClient
+from clawbridge_client import ClawBridgeClient, CLAWBRIDGE_DIR
+
+DEBUG_LOG = CLAWBRIDGE_DIR / "debug.log"
 
 
 def log(msg: str):
@@ -50,51 +34,6 @@ def dlog(msg: str):
     try:
         with open(DEBUG_LOG, "a", encoding="utf-8") as f:
             f.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
-    except Exception:
-        pass
-
-
-def _inbox_load() -> list:
-    with _inbox_lock:
-        return list(_inbox_memory)
-
-
-def _inbox_append(sender_id: str, text: str, msg_id: str = "", timestamp: int = 0):
-    entry = {
-        "msg_id": msg_id,
-        "from": sender_id,
-        "text": text,
-        "timestamp": timestamp,
-        "received_at": time.strftime("%Y-%m-%d %H:%M:%S")
-    }
-    with _inbox_lock:
-        _inbox_memory.append(entry)
-        try:
-            with open(INBOX_FILE, "w", encoding="utf-8") as f:
-                json.dump(_inbox_memory, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
-
-
-def _inbox_clear():
-    global _inbox_memory
-    with _inbox_lock:
-        _inbox_memory = []
-        try:
-            INBOX_FILE.unlink(missing_ok=True)
-        except Exception:
-            pass
-
-
-def _inbox_restore_from_file():
-    global _inbox_memory
-    try:
-        if INBOX_FILE.exists():
-            with open(INBOX_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, list):
-                with _inbox_lock:
-                    _inbox_memory = data
     except Exception:
         pass
 
@@ -194,7 +133,6 @@ class ClawBridgeMCPServer:
     def _on_message(self, sender_id: str, clear_text: str, msg_id: str = "", timestamp: int = 0):
         log(f"[ClawBridge] 📨 收到来自 {sender_id} 的消息: {clear_text}")
         dlog(f"_on_message: from={sender_id} msg_id={msg_id} text={clear_text!r}")
-        _inbox_append(sender_id, clear_text, msg_id, timestamp)
 
     async def _handle_tool_call(self, name: str, arguments: dict) -> str:
         if name == "send_clawbridge_message":
@@ -215,10 +153,9 @@ class ClawBridgeMCPServer:
 
         if name == "check_messages":
             await asyncio.sleep(2.0)
-            messages = _inbox_load()
+            messages = self.client.drain_inbox()
             if not messages:
                 return "📭 暂无新消息。"
-            _inbox_clear()
             lines = [f"📨 收到 {len(messages)} 条新消息：\n"]
             for m in messages:
                 sender_id  = m["from"]
@@ -311,7 +248,6 @@ class ClawBridgeMCPServer:
                 })
 
     async def run(self):
-        _inbox_restore_from_file()
         asyncio.create_task(self.client.connect_and_listen())
         log("[ClawBridge MCP] 服务器已启动，等待宿主指令...")
 

@@ -35,6 +35,7 @@ _INSTANCE_ID   = hashlib.md5(_build_fingerprint().encode()).hexdigest()[:8]
 CLAWBRIDGE_DIR = Path.home() / ".clawbridge" / _INSTANCE_ID
 IDENTITY_FILE  = CLAWBRIDGE_DIR / "identity.json"
 CONTACTS_FILE  = CLAWBRIDGE_DIR / "contacts.json"
+INBOX_FILE     = CLAWBRIDGE_DIR / "inbox.json"
 
 
 class ClawBridgeClient:
@@ -483,6 +484,9 @@ class ClawBridgeClient:
             except json.JSONDecodeError:
                 msg_id = ""; timestamp = 0; text = decrypted_json
 
+            # 无论是否有回调，都持久化到收件箱文件
+            self._inbox_persist(sender_id, text, msg_id, timestamp)
+
             if self.message_callback:
                 self.message_callback(sender_id, text, msg_id, timestamp)
             else:
@@ -568,3 +572,43 @@ class ClawBridgeClient:
         await self.ws.send(json.dumps(relay_msg))
         self._auto_add_contact(target_id)
         _log(f"[{self.client_id}] 🚀 已向 {target_id} 发送加密消息")
+
+    # ── 收件箱持久化 ──────────────────────────────────────────────────
+
+    def _inbox_persist(self, sender_id: str, text: str, msg_id: str, timestamp: int):
+        """将解密后的消息追加到 ~/.clawbridge/<hash>/inbox.json"""
+        try:
+            entries = self._inbox_read_raw()
+            entries.append({
+                "msg_id":      msg_id,
+                "from":        sender_id,
+                "text":        text,
+                "timestamp":   timestamp,
+                "received_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            })
+            INBOX_FILE.write_text(
+                json.dumps(entries, ensure_ascii=False, indent=2),
+                encoding="utf-8"
+            )
+            _log(f"[ClawBridge] 📥 消息已持久化到收件箱：{INBOX_FILE}")
+        except Exception as e:
+            _log(f"[ClawBridge] ⚠️ 收件箱写入失败: {e}")
+
+    def _inbox_read_raw(self) -> list:
+        try:
+            if INBOX_FILE.exists():
+                data = json.loads(INBOX_FILE.read_text(encoding="utf-8"))
+                if isinstance(data, list):
+                    return data
+        except Exception:
+            pass
+        return []
+
+    def drain_inbox(self) -> list:
+        """取出收件箱所有消息并清空文件，供 check_messages 使用"""
+        entries = self._inbox_read_raw()
+        try:
+            INBOX_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return entries
