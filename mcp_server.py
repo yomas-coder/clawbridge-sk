@@ -131,6 +131,7 @@ class ClawBridgeMCPServer:
         self.client.set_callback(self._on_message)
 
     def _on_message(self, sender_id: str, clear_text: str, msg_id: str = "", timestamp: int = 0):
+        # 消息持久化已由 ClawBridgeClient._inbox_persist() 处理，此处仅记录日志
         log(f"[ClawBridge] 📨 收到来自 {sender_id} 的消息: {clear_text}")
         dlog(f"_on_message: from={sender_id} msg_id={msg_id} text={clear_text!r}")
 

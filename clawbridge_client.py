@@ -6,6 +6,7 @@ import time
 import hashlib
 import os
 import random
+import threading
 import uuid
 from pathlib import Path
 
@@ -36,6 +37,7 @@ CLAWBRIDGE_DIR = Path.home() / ".clawbridge" / _INSTANCE_ID
 IDENTITY_FILE  = CLAWBRIDGE_DIR / "identity.json"
 CONTACTS_FILE  = CLAWBRIDGE_DIR / "contacts.json"
 INBOX_FILE     = CLAWBRIDGE_DIR / "inbox.json"
+_inbox_file_lock = threading.Lock()   # 保护收件箱文件的并发读写
 
 
 class ClawBridgeClient:
@@ -85,6 +87,10 @@ class ClawBridgeClient:
         self.lookup_events = {}
         self._notice = ""              # 待推送给 connection_status 的通知（读后清空）
         self._pending_reregister = False  # 因账号被删触发的重注册标记
+        # 重启后从收件箱文件重建已见 msg_id 集合，防重复投递
+        self._seen_msg_ids: set = {
+            e.get("msg_id") for e in self._inbox_read_raw() if e.get("msg_id")
+        }
 
     # ── 身份持久化 ────────────────────────────────────────────────────
 
@@ -576,39 +582,50 @@ class ClawBridgeClient:
     # ── 收件箱持久化 ──────────────────────────────────────────────────
 
     def _inbox_persist(self, sender_id: str, text: str, msg_id: str, timestamp: int):
-        """将解密后的消息追加到 ~/.clawbridge/<hash>/inbox.json"""
-        try:
-            entries = self._inbox_read_raw()
-            entries.append({
+        """将解密后的消息追加到 ~/.clawbridge/<hash>/inbox.jsonl（JSONL格式，O(1) 追加写）"""
+        with _inbox_file_lock:
+            if msg_id and msg_id in self._seen_msg_ids:
+                _log(f"[ClawBridge] 🔁 重复消息已忽略: {msg_id}")
+                return
+            entry = {
                 "msg_id":      msg_id,
                 "from":        sender_id,
                 "text":        text,
                 "timestamp":   timestamp,
                 "received_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            })
-            INBOX_FILE.write_text(
-                json.dumps(entries, ensure_ascii=False, indent=2),
-                encoding="utf-8"
-            )
-            _log(f"[ClawBridge] 📥 消息已持久化到收件箱：{INBOX_FILE}")
-        except Exception as e:
-            _log(f"[ClawBridge] ⚠️ 收件箱写入失败: {e}")
+            }
+            try:
+                with open(str(INBOX_FILE), "a", encoding="utf-8") as f:
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                if msg_id:
+                    self._seen_msg_ids.add(msg_id)
+                _log(f"[ClawBridge] 📥 消息已持久化到收件箱：{INBOX_FILE}")
+            except Exception as e:
+                _log(f"[ClawBridge] ⚠️ 收件箱写入失败: {e}")
 
     def _inbox_read_raw(self) -> list:
+        """读取 JSONL 格式收件箱，每行一条消息"""
+        entries = []
         try:
             if INBOX_FILE.exists():
-                data = json.loads(INBOX_FILE.read_text(encoding="utf-8"))
-                if isinstance(data, list):
-                    return data
-        except Exception:
-            pass
-        return []
-
-    def drain_inbox(self) -> list:
-        """取出收件箱所有消息并清空文件，供 check_messages 使用"""
-        entries = self._inbox_read_raw()
-        try:
-            INBOX_FILE.unlink(missing_ok=True)
+                for line in INBOX_FILE.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line:
+                        try:
+                            entries.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            pass
         except Exception:
             pass
         return entries
+
+    def drain_inbox(self) -> list:
+        """取出收件箱所有消息并清空文件，供 check_messages 使用"""
+        with _inbox_file_lock:
+            entries = self._inbox_read_raw()
+            try:
+                INBOX_FILE.unlink(missing_ok=True)
+            except Exception:
+                pass
+            self._seen_msg_ids.clear()
+            return entries
