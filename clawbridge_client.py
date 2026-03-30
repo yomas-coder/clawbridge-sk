@@ -6,6 +6,7 @@ import time
 import hashlib
 import os
 import random
+import uuid
 from pathlib import Path
 
 import websockets
@@ -19,9 +20,18 @@ def _log(msg: str):
     print(msg, file=sys.stderr, flush=True)
 
 
-# 用 skill 安装目录的路径哈希做命名空间，确保同一台机器上多个 Agent 各自独立身份
-_SKILL_DIR     = Path(__file__).parent.resolve()
-_INSTANCE_ID   = hashlib.md5(str(_SKILL_DIR).encode()).hexdigest()[:8]
+# 身份指纹优先级链：
+#   1. CLAWBRIDGE_FINGERPRINT 环境变量（云部署、容器场景必填）
+#   2. MAC地址 + 宿主app目录名（本地桌面，WorkBuddy/QClaw 零配置）
+def _build_fingerprint() -> str:
+    explicit = os.environ.get("CLAWBRIDGE_FINGERPRINT")
+    if explicit:
+        return explicit
+    mac      = uuid.getnode()
+    app_name = Path(__file__).parent.parent.parent.name  # ".workbuddy" / ".qclaw"
+    return f"{mac}:{app_name}"
+
+_INSTANCE_ID   = hashlib.md5(_build_fingerprint().encode()).hexdigest()[:8]
 CLAWBRIDGE_DIR = Path.home() / ".clawbridge" / _INSTANCE_ID
 IDENTITY_FILE  = CLAWBRIDGE_DIR / "identity.json"
 CONTACTS_FILE  = CLAWBRIDGE_DIR / "contacts.json"
