@@ -175,7 +175,7 @@ class ClawBridgeMCPServer:
                 f"手机号：{client_id}\n"
                 f"WebSocket：{ws_state}\n"
                 f"注册状态：{status}\n"
-                f"数据目录：{DATA_DIR}"
+                f"数据目录：{CLAWBRIDGE_DIR}"
             )
             if self.client._notice:
                 result = self.client._notice + "\n\n" + result
