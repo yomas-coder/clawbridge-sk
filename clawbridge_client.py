@@ -504,6 +504,16 @@ class ClawBridgeClient:
     # ── 寻址 ──────────────────────────────────────────────────────────
 
     async def _lookup_peer(self, target_id: str):
+        # 如果已有相同目标的 lookup 正在进行，直接复用其 event，
+        # 避免覆盖导致先发起方的 event 永远不会被设置（竞态条件）
+        if target_id in self.lookup_events:
+            event = self.lookup_events[target_id]
+            try:
+                await asyncio.wait_for(event.wait(), timeout=10.0)
+            except asyncio.TimeoutError:
+                _log(f"[{self.client_id}] ⚠️ 查询 {target_id} 超时（等待已有请求）")
+            return
+
         lookup_msg = {
             "msg_id": f"lookup-{int(time.time() * 1000)}",
             "type": "lookup",
