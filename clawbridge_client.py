@@ -84,7 +84,7 @@ class ClawBridgeClient:
         self.peer_keys_cache  = {}   # { "@10002": "base64_pub_key" or None }
         self.message_callback = None
         self._pending_messages = []
-        self.lookup_events = {}
+        self.lookup_futures = {}  # { "@10002": asyncio.Future } 连接断开时自动 cancel
         self._notice = ""              # 待推送给 connection_status 的通知（读后清空）
         self._pending_reregister = False  # 因账号被删触发的重注册标记
         # 重启后从收件箱文件重建已见 msg_id 集合，防重复投递
@@ -374,6 +374,11 @@ class ClawBridgeClient:
             _log(f"[ClawBridge] ❌ 失去基站信号: {e}，5 秒后重连...")
         self.ws = None
         self._registered = False
+        # 断线时立即取消所有挂起的寻址请求，让 send_message 快速感知失败
+        for _fut in list(self.lookup_futures.values()):
+            if not _fut.done():
+                _fut.cancel()
+        self.lookup_futures.clear()
         await asyncio.sleep(5)
         asyncio.create_task(self.connect_and_listen())
 
@@ -453,8 +458,10 @@ class ClawBridgeClient:
                 self.peer_keys_cache[target_id] = pub_key
             else:
                 self.peer_keys_cache[target_id] = None  # 已确认：用户未注册
-            if target_id in self.lookup_events:
-                self.lookup_events[target_id].set()
+            if target_id in self.lookup_futures:
+                fut = self.lookup_futures[target_id]
+                if not fut.done():
+                    fut.set_result(pub_key)
 
         elif msg_type == "relay":
             sender_id = data.get("from")
@@ -504,15 +511,18 @@ class ClawBridgeClient:
     # ── 寻址 ──────────────────────────────────────────────────────────
 
     async def _lookup_peer(self, target_id: str):
-        # 如果已有相同目标的 lookup 正在进行，直接复用其 event，
-        # 避免覆盖导致先发起方的 event 永远不会被设置（竞态条件）
-        if target_id in self.lookup_events:
-            event = self.lookup_events[target_id]
+        # 复用进行中的寻址请求（防止重复发包）
+        if target_id in self.lookup_futures:
             try:
-                await asyncio.wait_for(event.wait(), timeout=10.0)
-            except asyncio.TimeoutError:
-                _log(f"[{self.client_id}] ⚠️ 查询 {target_id} 超时（等待已有请求）")
+                await asyncio.shield(self.lookup_futures[target_id])
+            except (asyncio.CancelledError, Exception):
+                pass
             return
+
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        self.lookup_futures[target_id] = fut
+
 
         lookup_msg = {
             "msg_id": f"lookup-{int(time.time() * 1000)}",
@@ -522,15 +532,15 @@ class ClawBridgeClient:
             "timestamp": int(time.time() * 1000),
             "payload": {"target_id": target_id},
         }
-        event = asyncio.Event()
-        self.lookup_events[target_id] = event
         await self.ws.send(json.dumps(lookup_msg))
         try:
-            await asyncio.wait_for(event.wait(), timeout=10.0)
+            await asyncio.wait_for(fut, timeout=30.0)
         except asyncio.TimeoutError:
-            _log(f"[{self.client_id}] ⚠️ 查询 {target_id} 超时")
+            _log(f"[{self.client_id}] ⚠️ 查询 {target_id} 超时（安全网触发）")
+        except asyncio.CancelledError:
+            _log(f"[{self.client_id}] ⚠️ 查询 {target_id} 取消（连接已断开）")
         finally:
-            self.lookup_events.pop(target_id, None)
+            self.lookup_futures.pop(target_id, None)
 
     # ── 发送消息 ──────────────────────────────────────────────────────
 
